@@ -1,77 +1,108 @@
-# 前提
-今回のリモートサーバーのOSは、AlmaLinux8.10であるため、Linuxのコマンドを記載している。
+# mvb (my-vocabulary-book) デプロイ手順
 
-# access
-https://my-vocabulary-book.hisho-123.com
+## アクセス URL
 
-# deploy方法
-## local での事前準備
-- backendのビルド
-  - ディレクトリ移動
-    ```
-    cd backend/
-    ```
-  - ビルド
-    ```
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o my-vocabulary-book_backend
-    ```
-  - バイナリファイルを配置
-    ```
-    cp ./my-vocabulary-book_backend ../server/my-vocabulary-book/
-    ```
-  - ディレクトリ移動
-    ```
-    cd ..
-    ```
-- frontendのビルド
-  - my-vocabulary-book_frontend/ のリポジトリに移動して、下記コマンドを実行する。
-    ```
-    npm run build
-    ```
-  - 静的ファイルの配置
-    ```
-    cp -r {{フロントエンドリポジトリのパス}}/dist/ ./server/my-vocabulary-book/frontend/
-    ```
-- 資材のアップロード
-  ```
-  scp -r ./server/my-vocabulary-book/ {{server_name}}:.
-  ```
+- フロントエンド: https://my-vocabulary-book.hisho-123.com
+- バックエンド API: https://api.my-vocabulary-book.hisho-123.com
 
-## remote作業
-- ssh接続
-  ```
-  ssh {{server_name}}
-  ```
+## 自動デプロイ (通常運用)
 
-## DBの起動
-### docker環境の準備
-- docker のインストール
-  ```
-  sudo dnf install -y dnf-plugins-core
-  sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-  sudo dnf install -y docker-ce docker-ce-cli containerd.io
-  ```
-- docker 起動
-  ```
-  sudo systemctl start docker
-  sudo systemctl enable docker
-  ```
-- ディレクトリ移動
-  ```
-  cd my-vocabulary-book/
-  ```
-- DB(docker)起動
-  ```
-  docker compose up -d
-  ```
+`main` ブランチへ push / PR マージすると GitHub Actions が自動実行されます。
 
-## アプリの起動
-- logファイル作成
-  ```
-  sudo mkdir -p /var/log/app/
-  sudo touch /var/log/app/my-vocabulary-book.log
-  ```
-- 起動
-  ```
-  nohup ./my-vocabulary-book/backend > /var/log/app/my-vocabulary-book.log 2>&1 &
-  ```
+| リポジトリ | トリガー | デプロイ先 |
+|---|---|---|
+| `my-vocabulary-book_frontend` | push to main | S3 → CloudFront |
+| `my-vocabulary-book_backend` | push to main | S3 → CodeDeploy → EC2 ASG |
+
+GitHub Actions の実行状況は各リポジトリの **Actions** タブで確認してください。
+
+### GitHub Secrets (各リポジトリに設定が必要)
+
+**my-vocabulary-book_backend:**
+
+| Secret 名 | 値 (Terraform output から取得) |
+|---|---|
+| `AWS_ROLE_ARN_BACKEND` | `github_actions_backend_role_arn` |
+| `CODEDEPLOY_BUCKET` | `codedeploy_artifacts_bucket` |
+| `CODEDEPLOY_APP` | `codedeploy_app_name` |
+| `CODEDEPLOY_DEPLOYMENT_GROUP` | `codedeploy_deployment_group_name` |
+
+**my-vocabulary-book_frontend:**
+
+| Secret 名 | 値 (Terraform output から取得) |
+|---|---|
+| `AWS_ROLE_ARN_FRONTEND` | `github_actions_frontend_role_arn` |
+| `FRONTEND_BUCKET` | `frontend_s3_bucket` |
+| `CLOUDFRONT_DISTRIBUTION_ID` | `cloudfront_distribution_id` |
+
+---
+
+## 手動デプロイ（緊急時）
+
+CI/CD が使えない場合の手動手順です。
+
+### 前提
+
+- リモートサーバー OS: AlmaLinux 8.10 (EC2)
+- `{{server_name}}` を実際のサーバー名/IP に置き換えてください
+
+### 1. バックエンドビルド (ローカル)
+
+```bash
+cd my-vocabulary-book_backend/src/
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o my-vocabulary-book_backend .
+cp ./my-vocabulary-book_backend /path/to/deploy_repo/server/mvb/backend/
+```
+
+### 2. フロントエンドビルド (ローカル)
+
+```bash
+# my-vocabulary-book_frontend/ で実行
+npm run build
+cp -r dist/ /path/to/deploy_repo/server/mvb/frontend/
+```
+
+### 3. 資材のアップロード
+
+```bash
+scp -r ./server/mvb/ {{server_name}}:.
+```
+
+### 4. リモート作業
+
+```bash
+ssh {{server_name}}
+```
+
+#### バックエンド起動
+
+```bash
+sudo mkdir -p /var/log/app/
+sudo touch /var/log/app/my-vocabulary-book.log
+chmod +x ~/mvb/backend/my-vocabulary-book_backend
+sudo cp ~/mvb/backend/my-vocabulary-book_backend /opt/my-vocabulary-book/
+sudo systemctl restart my-vocabulary-book
+```
+
+#### フロントエンド配信 (S3 へ直接アップロード)
+
+```bash
+aws s3 sync ~/mvb/frontend/ s3://{{frontend_bucket}} --delete
+aws cloudfront create-invalidation \
+  --distribution-id {{cloudfront_distribution_id}} \
+  --paths "/*"
+```
+
+---
+
+## DB マイグレーション
+
+マイグレーションは自動デプロイとは分離して手動で実行します。
+
+```bash
+# リモートサーバーで実行
+cd /path/to/migrations/
+# マイグレーションコマンドをここに記載
+```
+
+マイグレーションファイルは `infra/migrations/` を参照してください。
